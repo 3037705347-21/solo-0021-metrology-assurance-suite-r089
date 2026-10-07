@@ -17,29 +17,31 @@ const (
 )
 
 type VerificationCase struct {
-	ID        string     `json:"id"`
-	DeviceID  string     `json:"device_id"`
-	Nominal   float64    `json:"nominal"`
-	Tolerance float64    `json:"tolerance"`
-	Steward   string     `json:"steward"`
-	State     CaseState  `json:"state"`
-	Version   int        `json:"version"`
-	OpenedAt  time.Time  `json:"opened_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	SealedAt  *time.Time `json:"sealed_at,omitempty"`
+	ID         string     `json:"id"`
+	DeviceID   string     `json:"device_id"`
+	BaselineID string     `json:"baseline_id"`
+	Nominal    float64    `json:"nominal"`
+	Tolerance  float64    `json:"tolerance"`
+	Steward    string     `json:"steward"`
+	State      CaseState  `json:"state"`
+	Version    int        `json:"version"`
+	OpenedAt   time.Time  `json:"opened_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	SealedAt   *time.Time `json:"sealed_at,omitempty"`
 }
 
-func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
+func NewVerificationCase(id, deviceID, baselineID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
 	item := VerificationCase{
-		ID:        strings.TrimSpace(id),
-		DeviceID:  strings.TrimSpace(deviceID),
-		Nominal:   nominal,
-		Tolerance: tolerance,
-		Steward:   strings.TrimSpace(steward),
-		State:     CaseAwaitingMeasurement,
-		Version:   1,
-		OpenedAt:  at.UTC(),
-		UpdatedAt: at.UTC(),
+		ID:         strings.TrimSpace(id),
+		DeviceID:   strings.TrimSpace(deviceID),
+		BaselineID: strings.TrimSpace(baselineID),
+		Nominal:    nominal,
+		Tolerance:  tolerance,
+		Steward:    strings.TrimSpace(steward),
+		State:      CaseAwaitingMeasurement,
+		Version:    1,
+		OpenedAt:   at.UTC(),
+		UpdatedAt:  at.UTC(),
 	}
 	if err := item.Validate(); err != nil {
 		return VerificationCase{}, err
@@ -48,8 +50,8 @@ func NewVerificationCase(id, deviceID string, nominal, tolerance float64, stewar
 }
 
 func (c VerificationCase) Validate() error {
-	if c.ID == "" || c.DeviceID == "" || c.Steward == "" {
-		return fmt.Errorf("%w: case id, device id, and steward are required", ErrInvalidInput)
+	if c.ID == "" || c.DeviceID == "" || c.BaselineID == "" || c.Steward == "" {
+		return fmt.Errorf("%w: case id, device id, baseline id, and steward are required", ErrInvalidInput)
 	}
 	if !isFinite(c.Nominal) || !isFinite(c.Tolerance) || c.Tolerance <= 0 {
 		return fmt.Errorf("%w: nominal must be finite and tolerance must be positive", ErrInvalidInput)
@@ -88,6 +90,26 @@ func (c *VerificationCase) Reopen(at time.Time) error {
 		return fmt.Errorf("%w: only a recheck_required case can be reopened", ErrStateConflict)
 	}
 	c.State = CaseAwaitingMeasurement
+	c.Version++
+	c.UpdatedAt = at.UTC()
+	return nil
+}
+
+func (c *VerificationCase) Rebaseline(baselineID string, at time.Time) error {
+	if c.State == CaseSealed {
+		return fmt.Errorf("%w: a sealed case cannot be rebaselined", ErrStateConflict)
+	}
+	baselineID = strings.TrimSpace(baselineID)
+	if baselineID == "" {
+		return fmt.Errorf("%w: baseline id is required", ErrInvalidInput)
+	}
+	if c.BaselineID == baselineID {
+		return fmt.Errorf("%w: case is already aligned with the current configuration baseline", ErrStateConflict)
+	}
+	c.BaselineID = baselineID
+	if c.State != CaseAwaitingMeasurement {
+		c.State = CaseAwaitingMeasurement
+	}
 	c.Version++
 	c.UpdatedAt = at.UTC()
 	return nil

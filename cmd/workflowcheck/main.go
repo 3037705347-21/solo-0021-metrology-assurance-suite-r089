@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +35,7 @@ func main() {
 
 	checks := map[string]func() error{
 		"register-device":          checkRegisterDevice,
+		"config-baseline":          checkConfigBaseline,
 		"open-verification-case":   checkOpenVerificationCase,
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
@@ -112,11 +112,367 @@ func checkRegisterDevice() error {
 	return expectErrorCode(duplicate, "duplicate_asset_tag")
 }
 
+func checkConfigBaseline() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+
+	missing, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(missing, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(missing, "config_baseline_missing"); err != nil {
+		return err
+	}
+
+	base := time.Now().Add(-2 * time.Hour)
+	first, err := h.registerBaseline(deviceID, "fw-1.0.0/corr-A", base)
+	if err != nil {
+		return err
+	}
+	firstID, err := nestedString(first.Body, "baseline", "id")
+	if err != nil {
+		return err
+	}
+
+	duplicate, err := h.request(http.MethodPost, "/devices/"+deviceID+"/configurations", map[string]any{
+		"version":      "fw-1.0.0/corr-A",
+		"effective_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"steward":      "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "duplicate_config_version"); err != nil {
+		return err
+	}
+
+	regression, err := h.request(http.MethodPost, "/devices/"+deviceID+"/configurations", map[string]any{
+		"version":      "fw-0.9.0/corr-Z",
+		"effective_at": base.Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		"steward":      "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(regression, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(regression, "config_baseline_regression"); err != nil {
+		return err
+	}
+
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	pinned, err := nestedString(opened.Body, "case", "baseline_id")
+	if err != nil {
+		return err
+	}
+	if pinned != firstID {
+		return fmt.Errorf("case pinned baseline %q, expected %q", pinned, firstID)
+	}
+	drifted, err := nestedBool(opened.Body, "config_drifted")
+	if err != nil {
+		return err
+	}
+	if drifted {
+		return errors.New("freshly opened case must not report config drift")
+	}
+
+	aligned, err := h.request(http.MethodPost, "/cases/"+caseID+"/rebaseline", map[string]any{
+		"actor":  "Lin",
+		"reason": "no drift has occurred",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(aligned, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(aligned, "state_conflict"); err != nil {
+		return err
+	}
+
+	second, err := h.registerBaseline(deviceID, "fw-2.0.0/corr-B", base.Add(time.Hour))
+	if err != nil {
+		return err
+	}
+	secondID, err := nestedString(second.Body, "baseline", "id")
+	if err != nil {
+		return err
+	}
+
+	blocked, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "config_drift"); err != nil {
+		return err
+	}
+
+	view, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	drifted, err = nestedBool(view.Body, "config_drifted")
+	if err != nil {
+		return err
+	}
+	if !drifted {
+		return errors.New("case should report config drift after a newer baseline takes effect")
+	}
+	current, err := nestedString(view.Body, "current_baseline", "id")
+	if err != nil {
+		return err
+	}
+	if current != secondID {
+		return fmt.Errorf("current baseline %q, expected %q", current, secondID)
+	}
+
+	rebaselined, err := h.request(http.MethodPost, "/cases/"+caseID+"/rebaseline", map[string]any{
+		"actor":  "Lin",
+		"reason": "firmware updated during the case; re-measuring under the new baseline",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rebaselined, http.StatusOK); err != nil {
+		return err
+	}
+	pinned, err = nestedString(rebaselined.Body, "case", "baseline_id")
+	if err != nil {
+		return err
+	}
+	if pinned != secondID {
+		return fmt.Errorf("rebaselined case pinned %q, expected %q", pinned, secondID)
+	}
+	drifted, err = nestedBool(rebaselined.Body, "config_drifted")
+	if err != nil {
+		return err
+	}
+	if drifted {
+		return errors.New("rebaselined case must not report config drift")
+	}
+
+	measured, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(measured, http.StatusCreated); err != nil {
+		return err
+	}
+	judged, err := nestedStringPath(measured.Body, "measurements", 0, "baseline_id")
+	if err != nil {
+		return err
+	}
+	if judged != secondID {
+		return fmt.Errorf("measurement baseline %q, expected %q", judged, secondID)
+	}
+
+	third, err := h.registerBaseline(deviceID, "fw-3.0.0/corr-C", base.Add(90*time.Minute))
+	if err != nil {
+		return err
+	}
+	thirdID, err := nestedString(third.Body, "baseline", "id")
+	if err != nil {
+		return err
+	}
+
+	blockedSeal, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Wei",
+		"summary":  "attempted while the configuration had drifted",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blockedSeal, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blockedSeal, "config_drift"); err != nil {
+		return err
+	}
+
+	rebaselined, err = h.request(http.MethodPost, "/cases/"+caseID+"/rebaseline", map[string]any{
+		"actor":  "Lin",
+		"reason": "correction parameters revised; the earlier reading predates them",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rebaselined, http.StatusOK); err != nil {
+		return err
+	}
+	state, err := nestedString(rebaselined.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "awaiting_measurement" {
+		return fmt.Errorf("rebaselined review case state = %q", state)
+	}
+	kept, err := nestedStringPath(rebaselined.Body, "measurements", 0, "baseline_id")
+	if err != nil {
+		return err
+	}
+	if kept != secondID {
+		return fmt.Errorf("historical measurement baseline rewritten to %q", kept)
+	}
+
+	measured, err = h.recordMeasurement(caseID, 25.1, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(measured, http.StatusCreated); err != nil {
+		return err
+	}
+
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Wei",
+		"summary":  "sealed under configuration fw-3.0.0/corr-C",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	sealBaseline, err := nestedString(sealed.Body, "seal", "baseline_id")
+	if err != nil {
+		return err
+	}
+	if sealBaseline != thirdID {
+		return fmt.Errorf("seal baseline %q, expected %q", sealBaseline, thirdID)
+	}
+
+	if _, err := h.registerBaseline(deviceID, "fw-4.0.0/corr-D", base.Add(100*time.Minute)); err != nil {
+		return err
+	}
+	view, err = h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(view, http.StatusOK); err != nil {
+		return err
+	}
+	pinned, err = nestedString(view.Body, "case", "baseline_id")
+	if err != nil {
+		return err
+	}
+	if pinned != thirdID {
+		return fmt.Errorf("sealed case baseline rewritten to %q", pinned)
+	}
+	drifted, err = nestedBool(view.Body, "config_drifted")
+	if err != nil {
+		return err
+	}
+	if drifted {
+		return errors.New("sealed case must never report config drift")
+	}
+	sealBaseline, err = nestedString(view.Body, "seal", "baseline_id")
+	if err != nil {
+		return err
+	}
+	if sealBaseline != thirdID {
+		return fmt.Errorf("sealed evidence baseline rewritten to %q", sealBaseline)
+	}
+
+	late, err := h.request(http.MethodPost, "/cases/"+caseID+"/rebaseline", map[string]any{
+		"actor":  "Lin",
+		"reason": "attempted after sealing",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(late, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(late, "state_conflict"); err != nil {
+		return err
+	}
+
+	events, err := h.request(http.MethodGet, "/cases/"+caseID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	for _, kind := range []string{"config_drift_pending", "case_rebaselined", "case_sealed"} {
+		if !hasEvent(events.Body, kind) {
+			return fmt.Errorf("audit event %s is missing", kind)
+		}
+	}
+	if !eventHasBaseline(events.Body, "measurement_accepted") {
+		return errors.New("measurement events do not record their configuration baseline")
+	}
+
+	list, err := h.request(http.MethodGet, "/devices/"+deviceID+"/configurations", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(list, http.StatusOK); err != nil {
+		return err
+	}
+	baselines, err := nestedSlice(list.Body, "baselines")
+	if err != nil {
+		return err
+	}
+	if len(baselines) != 4 {
+		return fmt.Errorf("baseline count = %d, expected 4", len(baselines))
+	}
+	lastEffective := time.Time{}
+	for _, item := range baselines {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return errors.New("baseline entry is not an object")
+		}
+		text, ok := object["effective_at"].(string)
+		if !ok {
+			return errors.New("baseline effective_at is missing")
+		}
+		stamp, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			return fmt.Errorf("parse effective_at: %w", err)
+		}
+		if !stamp.After(lastEffective) {
+			return errors.New("baselines are not ordered by effective time")
+		}
+		lastEffective = stamp
+	}
+	return nil
+}
+
 func checkOpenVerificationCase() error {
 	h := newHarness()
 	defer h.close()
 
-	deviceID, err := h.createDevice("MET-1101")
+	deviceID, err := h.createConfiguredDevice("MET-1101")
 	if err != nil {
 		return err
 	}
@@ -163,7 +519,7 @@ func checkRecordMeasurement() error {
 	h := newHarness()
 	defer h.close()
 
-	deviceID, err := h.createDevice("MET-1201")
+	deviceID, err := h.createConfiguredDevice("MET-1201")
 	if err != nil {
 		return err
 	}
@@ -208,7 +564,7 @@ func checkRecordMeasurement() error {
 		return err
 	}
 
-	rejectDeviceID, err := h.createDevice("MET-1202")
+	rejectDeviceID, err := h.createConfiguredDevice("MET-1202")
 	if err != nil {
 		return err
 	}
@@ -440,6 +796,33 @@ func (h *harness) createDevice(tag string) (string, error) {
 	return nestedString(response.Body, "device", "id")
 }
 
+func (h *harness) createConfiguredDevice(tag string) (string, error) {
+	deviceID, err := h.createDevice(tag)
+	if err != nil {
+		return "", err
+	}
+	if _, err := h.registerBaseline(deviceID, "fw-1.0.0/corr-A", time.Now().Add(-time.Hour)); err != nil {
+		return "", err
+	}
+	return deviceID, nil
+}
+
+func (h *harness) registerBaseline(deviceID, version string, effectiveAt time.Time) (apiResponse, error) {
+	response, err := h.request(http.MethodPost, "/devices/"+deviceID+"/configurations", map[string]any{
+		"version":      version,
+		"note":         "registered by workflowcheck",
+		"effective_at": effectiveAt.UTC().Format(time.RFC3339Nano),
+		"steward":      "Lin",
+	})
+	if err != nil {
+		return apiResponse{}, err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return apiResponse{}, err
+	}
+	return response, nil
+}
+
 func (h *harness) openCase(deviceID string) (apiResponse, error) {
 	response, err := h.request(http.MethodPost, "/cases", map[string]any{
 		"device_id": deviceID,
@@ -464,7 +847,7 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 }
 
 func (h *harness) rejectedCase(tag string) (string, error) {
-	deviceID, err := h.createDevice(tag)
+	deviceID, err := h.createConfiguredDevice(tag)
 	if err != nil {
 		return "", err
 	}
@@ -487,7 +870,7 @@ func (h *harness) rejectedCase(tag string) (string, error) {
 }
 
 func (h *harness) readyCase(tag string) (string, error) {
-	deviceID, err := h.createDevice(tag)
+	deviceID, err := h.createConfiguredDevice(tag)
 	if err != nil {
 		return "", err
 	}
@@ -528,13 +911,21 @@ func expectErrorCode(response apiResponse, expected string) error {
 }
 
 func nestedString(root map[string]any, path ...string) (string, error) {
-	value, err := nestedValue(root, path...)
+	parts := make([]any, 0, len(path))
+	for _, part := range path {
+		parts = append(parts, part)
+	}
+	return nestedStringPath(root, parts...)
+}
+
+func nestedStringPath(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
 	if err != nil {
 		return "", err
 	}
 	text, ok := value.(string)
 	if !ok {
-		return "", fmt.Errorf("%s is not a string", strings.Join(path, "."))
+		return "", fmt.Errorf("%v is not a string", path)
 	}
 	return text, nil
 }
@@ -580,12 +971,22 @@ func hasEvent(root map[string]any, kind string) bool {
 	return false
 }
 
-func nestedValue(root map[string]any, path ...string) (any, error) {
-	parts := make([]any, 0, len(path))
-	for _, part := range path {
-		parts = append(parts, part)
+func eventHasBaseline(root map[string]any, kind string) bool {
+	items, err := nestedSlice(root, "events")
+	if err != nil {
+		return false
 	}
-	return nestedAny(root, parts...)
+	for _, item := range items {
+		event, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if event["kind"] == kind {
+			baseline, ok := event["baseline_id"].(string)
+			return ok && baseline != ""
+		}
+	}
+	return false
 }
 
 func nestedAny(root map[string]any, path ...any) (any, error) {

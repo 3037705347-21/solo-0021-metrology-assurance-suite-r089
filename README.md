@@ -1,9 +1,27 @@
 # Metrology Assurance Suite
 
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
-measurement assurance work. It registers devices, opens verification cases,
-records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+measurement assurance work. It registers devices, tracks immutable device
+configuration baselines, opens verification cases pinned to the configuration
+in effect, records measurements, handles failed tolerance decisions, and seals
+traceable evidence records.
+
+## Configuration Baselines
+
+Firmware versions, fixtures, and correction parameters change while a device
+is in service. The steward registers each configuration as a baseline with a
+version label and an effective time (`POST /devices/{id}/configurations`).
+Baselines are append-only: versions are unique per device and effective times
+must move forward, so history cannot be rewritten retroactively.
+
+Opening a case pins the baseline in effect at that moment. Every measurement
+and the evidence seal record the baseline they were judged under, and the case
+view exposes the pinned baseline, the currently effective baseline, and a
+`config_drifted` flag. When a newer baseline takes effect during an unfinished
+case, measurements and sealing fail with `config_drift` until the steward
+explicitly rebaselines the case (`POST /cases/{id}/rebaseline`), which returns
+it to `awaiting_measurement`. Sealed cases keep their pinned baseline forever
+and can never be rebaselined.
 
 ## Run
 
@@ -18,6 +36,7 @@ The service listens on `127.0.0.1:18121` by default.
 ```bash
 go build ./...
 go run ./cmd/workflowcheck --workflow register-device
+go run ./cmd/workflowcheck --workflow config-baseline
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
@@ -36,10 +55,13 @@ or extend these smoke checks with red/green verification tests.
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/configurations`
+- `GET /devices/{id}/configurations`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
 - `POST /cases/{id}/reopen`
+- `POST /cases/{id}/rebaseline`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
 

@@ -11,18 +11,20 @@ type AuditEvent struct {
 	SubjectType string    `json:"subject_type"`
 	SubjectID   string    `json:"subject_id"`
 	CaseID      string    `json:"case_id,omitempty"`
+	BaselineID  string    `json:"baseline_id,omitempty"`
 	Kind        string    `json:"kind"`
 	Actor       string    `json:"actor"`
 	Detail      string    `json:"detail"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-func NewAuditEvent(id, subjectType, subjectID, caseID, kind, actor, detail string, at time.Time) (AuditEvent, error) {
+func NewAuditEvent(id, subjectType, subjectID, caseID, baselineID, kind, actor, detail string, at time.Time) (AuditEvent, error) {
 	item := AuditEvent{
 		ID:          strings.TrimSpace(id),
 		SubjectType: strings.TrimSpace(subjectType),
 		SubjectID:   strings.TrimSpace(subjectID),
 		CaseID:      strings.TrimSpace(caseID),
+		BaselineID:  strings.TrimSpace(baselineID),
 		Kind:        strings.TrimSpace(kind),
 		Actor:       strings.TrimSpace(actor),
 		Detail:      strings.TrimSpace(detail),

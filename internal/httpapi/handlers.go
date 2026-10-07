@@ -33,6 +33,29 @@ func (s *Server) device(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, contracts.DeviceResponse{Device: device})
 }
 
+func (s *Server) registerConfigBaseline(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterConfigBaselineRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	baseline, err := s.service.RegisterConfigBaseline(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.ConfigBaselineResponse{Baseline: baseline})
+}
+
+func (s *Server) listConfigBaselines(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.ConfigBaselines(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
 func (s *Server) openCase(writer http.ResponseWriter, request *http.Request) {
 	input, err := decodeJSON[contracts.OpenCaseRequest](writer, request)
 	if err != nil {
@@ -77,6 +100,20 @@ func (s *Server) reopenCase(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	view, err := s.service.ReopenCase(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) rebaselineCase(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RebaselineCaseRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.RebaselineCase(request.Context(), request.PathValue("id"), input)
 	if err != nil {
 		writeError(writer, err)
 		return

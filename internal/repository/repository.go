@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
@@ -14,6 +15,7 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string]domain.ConfigBaseline
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +26,7 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		baselines:    make(map[string]domain.ConfigBaseline),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +36,7 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string]domain.ConfigBaseline
 	events       []domain.AuditEvent
 }
 
@@ -62,6 +66,15 @@ func (s Snapshot) Measurements(caseID string) []domain.Measurement {
 func (s Snapshot) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := s.seals[caseID]
 	return item, ok
+}
+
+func (s Snapshot) Baseline(id string) (domain.ConfigBaseline, bool) {
+	item, ok := s.baselines[id]
+	return item, ok
+}
+
+func (s Snapshot) Baselines(deviceID string) []domain.ConfigBaseline {
+	return selectBaselines(s.baselines, deviceID)
 }
 
 func (s Snapshot) Events(caseID string) []domain.AuditEvent {
@@ -95,6 +108,7 @@ type Mutation struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string]domain.ConfigBaseline
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -181,6 +195,32 @@ func (m *Mutation) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	return item, ok
 }
 
+func (m *Mutation) Baseline(id string) (domain.ConfigBaseline, bool) {
+	item, ok := m.baselines[id]
+	return item, ok
+}
+
+func (m *Mutation) Baselines(deviceID string) []domain.ConfigBaseline {
+	return selectBaselines(m.baselines, deviceID)
+}
+
+func (m *Mutation) BaselineByVersion(deviceID, version string) (domain.ConfigBaseline, bool) {
+	for _, item := range m.baselines {
+		if item.DeviceID == deviceID && item.Version == version {
+			return item, true
+		}
+	}
+	return domain.ConfigBaseline{}, false
+}
+
+func (m *Mutation) PutBaseline(item domain.ConfigBaseline) error {
+	if _, exists := m.baselines[item.ID]; exists {
+		return fmt.Errorf("%w: configuration baseline %s", domain.ErrStateConflict, item.ID)
+	}
+	m.baselines[item.ID] = item
+	return nil
+}
+
 func (m *Mutation) PutSeal(item domain.EvidenceSeal) error {
 	if _, exists := m.seals[item.CaseID]; exists {
 		return fmt.Errorf("%w: case %s", domain.ErrSealAlreadyCreated, item.CaseID)
@@ -224,6 +264,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		baselines:    cloneBaselines(r.baselines),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +275,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.baselines = next.baselines
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +287,7 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		baselines:    cloneBaselines(r.baselines),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -278,6 +321,30 @@ func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.Evidenc
 	for key, value := range values {
 		result[key] = value
 	}
+	return result
+}
+
+func cloneBaselines(values map[string]domain.ConfigBaseline) map[string]domain.ConfigBaseline {
+	result := make(map[string]domain.ConfigBaseline, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func selectBaselines(values map[string]domain.ConfigBaseline, deviceID string) []domain.ConfigBaseline {
+	result := make([]domain.ConfigBaseline, 0, len(values))
+	for _, item := range values {
+		if item.DeviceID == deviceID {
+			result = append(result, item)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].EffectiveAt.Equal(result[j].EffectiveAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].EffectiveAt.Before(result[j].EffectiveAt)
+	})
 	return result
 }
 

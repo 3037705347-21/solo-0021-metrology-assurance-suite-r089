@@ -9,6 +9,7 @@ import (
 type Measurement struct {
 	ID         string    `json:"id"`
 	CaseID     string    `json:"case_id"`
+	BaselineID string    `json:"baseline_id"`
 	Observed   float64   `json:"observed"`
 	Nominal    float64   `json:"nominal"`
 	Deviation  float64   `json:"deviation"`
@@ -18,10 +19,11 @@ type Measurement struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, technician string, at time.Time) (Measurement, error) {
+func NewMeasurement(id, caseID, baselineID string, observed, nominal, tolerance float64, technician string, at time.Time) (Measurement, error) {
 	item := Measurement{
 		ID:         strings.TrimSpace(id),
 		CaseID:     strings.TrimSpace(caseID),
+		BaselineID: strings.TrimSpace(baselineID),
 		Observed:   observed,
 		Nominal:    nominal,
 		Deviation:  observed - nominal,
@@ -37,8 +39,8 @@ func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, tec
 }
 
 func (m Measurement) Validate() error {
-	if m.ID == "" || m.CaseID == "" || m.Technician == "" {
-		return fmt.Errorf("%w: measurement id, case id, and technician are required", ErrInvalidInput)
+	if m.ID == "" || m.CaseID == "" || m.BaselineID == "" || m.Technician == "" {
+		return fmt.Errorf("%w: measurement id, case id, baseline id, and technician are required", ErrInvalidInput)
 	}
 	if !isFinite(m.Observed) || !isFinite(m.Nominal) || !isFinite(m.Tolerance) || m.Tolerance <= 0 {
 		return fmt.Errorf("%w: observed and nominal must be finite and tolerance must be positive", ErrInvalidInput)
