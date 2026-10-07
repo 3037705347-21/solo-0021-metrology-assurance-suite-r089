@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
 )
@@ -14,6 +15,7 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string][]domain.ConfigBaseline
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +26,7 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		baselines:    make(map[string][]domain.ConfigBaseline),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +36,7 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string][]domain.ConfigBaseline
 	events       []domain.AuditEvent
 }
 
@@ -62,6 +66,10 @@ func (s Snapshot) Measurements(caseID string) []domain.Measurement {
 func (s Snapshot) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := s.seals[caseID]
 	return item, ok
+}
+
+func (s Snapshot) Baselines(deviceID string) []domain.ConfigBaseline {
+	return append([]domain.ConfigBaseline(nil), s.baselines[deviceID]...)
 }
 
 func (s Snapshot) Events(caseID string) []domain.AuditEvent {
@@ -95,6 +103,7 @@ type Mutation struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	baselines    map[string][]domain.ConfigBaseline
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -189,6 +198,23 @@ func (m *Mutation) PutSeal(item domain.EvidenceSeal) error {
 	return nil
 }
 
+func (m *Mutation) Baselines(deviceID string) []domain.ConfigBaseline {
+	return append([]domain.ConfigBaseline(nil), m.baselines[deviceID]...)
+}
+
+func (m *Mutation) AppendBaseline(item domain.ConfigBaseline) error {
+	if _, exists := m.devices[item.DeviceID]; !exists {
+		return fmt.Errorf("%w: device %s", domain.ErrNotFound, item.DeviceID)
+	}
+	for _, existing := range m.baselines[item.DeviceID] {
+		if existing.EffectiveAt.Equal(item.EffectiveAt) {
+			return fmt.Errorf("%w: device %s already has a config baseline effective at %s", domain.ErrStateConflict, item.DeviceID, item.EffectiveAt.Format(time.RFC3339))
+		}
+	}
+	m.baselines[item.DeviceID] = append(m.baselines[item.DeviceID], item)
+	return nil
+}
+
 func (m *Mutation) AppendEvent(item domain.AuditEvent) {
 	m.events = append(m.events, item)
 }
@@ -224,6 +250,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		baselines:    cloneBaselines(r.baselines),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +261,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.baselines = next.baselines
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +273,7 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		baselines:    cloneBaselines(r.baselines),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -277,6 +306,14 @@ func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.Evidenc
 	result := make(map[string]domain.EvidenceSeal, len(values))
 	for key, value := range values {
 		result[key] = value
+	}
+	return result
+}
+
+func cloneBaselines(values map[string][]domain.ConfigBaseline) map[string][]domain.ConfigBaseline {
+	result := make(map[string][]domain.ConfigBaseline, len(values))
+	for key, value := range values {
+		result[key] = append([]domain.ConfigBaseline(nil), value...)
 	}
 	return result
 }

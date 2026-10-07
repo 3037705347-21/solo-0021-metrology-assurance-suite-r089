@@ -40,6 +40,7 @@ func main() {
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
+		"config-baseline":          checkConfigBaseline,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -116,7 +117,7 @@ func checkOpenVerificationCase() error {
 	h := newHarness()
 	defer h.close()
 
-	deviceID, err := h.createDevice("MET-1101")
+	deviceID, err := h.deviceWithBaseline("MET-1101")
 	if err != nil {
 		return err
 	}
@@ -163,7 +164,7 @@ func checkRecordMeasurement() error {
 	h := newHarness()
 	defer h.close()
 
-	deviceID, err := h.createDevice("MET-1201")
+	deviceID, err := h.deviceWithBaseline("MET-1201")
 	if err != nil {
 		return err
 	}
@@ -208,7 +209,7 @@ func checkRecordMeasurement() error {
 		return err
 	}
 
-	rejectDeviceID, err := h.createDevice("MET-1202")
+	rejectDeviceID, err := h.deviceWithBaseline("MET-1202")
 	if err != nil {
 		return err
 	}
@@ -375,6 +376,391 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkConfigBaseline() error {
+	h := newHarness()
+	defer h.close()
+
+	// A case cannot open while the device has no effective baseline.
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	blocked, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "no_effective_baseline"); err != nil {
+		return err
+	}
+
+	// Register the first baseline; the opened case pins it.
+	baseOneTime := time.Now().Add(-3 * time.Hour).UTC()
+	baselineOne, err := h.registerBaseline(deviceID, "fw-1.0", baseOneTime)
+	if err != nil {
+		return err
+	}
+	duplicate, err := h.request(http.MethodPost, "/devices/"+deviceID+"/config-baselines", map[string]any{
+		"firmware_version":  "fw-1.1",
+		"fixture":           "fixture-a",
+		"correction_params": "offset=0.02",
+		"effective_at":      baseOneTime,
+		"registered_by":     "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	pinned, err := nestedString(opened.Body, "case", "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if pinned != baselineOne {
+		return fmt.Errorf("opened case pinned %q, expected %q", pinned, baselineOne)
+	}
+	status, err := nestedString(opened.Body, "config_status")
+	if err != nil {
+		return err
+	}
+	if status != "current" {
+		return fmt.Errorf("opened case config status = %q", status)
+	}
+
+	// An out-of-tolerance measurement is decided under baseline one.
+	rejected, err := h.recordMeasurement(caseID, 26.5, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rejected, http.StatusCreated); err != nil {
+		return err
+	}
+	decidedWith, err := nestedStringAt(rejected.Body, "measurements", 0, "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if decidedWith != baselineOne {
+		return fmt.Errorf("measurement decided with %q, expected %q", decidedWith, baselineOne)
+	}
+
+	// A newer baseline takes effect while the case is unfinished.
+	baselineTwo, err := h.registerBaseline(deviceID, "fw-2.0", time.Now().Add(-2*time.Hour))
+	if err != nil {
+		return err
+	}
+	drifted, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	driftStatus, err := nestedString(drifted.Body, "config_status")
+	if err != nil {
+		return err
+	}
+	if driftStatus != "superseded" {
+		return fmt.Errorf("drifted case config status = %q", driftStatus)
+	}
+
+	// Progress is blocked until the drift is explicitly handled.
+	blockedReopen, err := h.request(http.MethodPost, "/cases/"+caseID+"/reopen", map[string]any{
+		"actor":  "Lin",
+		"reason": "retry after fixture check",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blockedReopen, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blockedReopen, "unresolved_config_drift"); err != nil {
+		return err
+	}
+	invalidAction, err := h.request(http.MethodPost, "/cases/"+caseID+"/config-resolution", map[string]any{
+		"actor":  "Lin",
+		"action": "ignore",
+		"reason": "not a supported action",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(invalidAction, http.StatusBadRequest); err != nil {
+		return err
+	}
+
+	// Explicit handling: keep the pinned baseline for this case.
+	resolved, err := h.request(http.MethodPost, "/cases/"+caseID+"/config-resolution", map[string]any{
+		"actor":  "Lin",
+		"action": "keep_pinned",
+		"reason": "fixture unchanged for this run",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(resolved, http.StatusOK); err != nil {
+		return err
+	}
+	kept, err := nestedString(resolved.Body, "case", "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if kept != baselineOne {
+		return fmt.Errorf("keep_pinned rebased the case to %q", kept)
+	}
+	acknowledged, err := nestedString(resolved.Body, "case", "acknowledged_config_id")
+	if err != nil {
+		return err
+	}
+	if acknowledged != baselineTwo {
+		return fmt.Errorf("acknowledged config = %q, expected %q", acknowledged, baselineTwo)
+	}
+	resolvedAgain, err := h.request(http.MethodPost, "/cases/"+caseID+"/config-resolution", map[string]any{
+		"actor":  "Lin",
+		"action": "keep_pinned",
+		"reason": "no drift remains",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(resolvedAgain, http.StatusConflict); err != nil {
+		return err
+	}
+
+	// The case proceeds and still decides with the pinned baseline.
+	reopened, err := h.request(http.MethodPost, "/cases/"+caseID+"/reopen", map[string]any{
+		"actor":  "Lin",
+		"reason": "retry after fixture check",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reopened, http.StatusOK); err != nil {
+		return err
+	}
+	accepted, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted, http.StatusCreated); err != nil {
+		return err
+	}
+	secondDecision, err := nestedStringAt(accepted.Body, "measurements", 1, "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if secondDecision != baselineOne {
+		return fmt.Errorf("second measurement decided with %q, expected %q", secondDecision, baselineOne)
+	}
+
+	// Another baseline change; this time the steward adopts it.
+	baselineThree, err := h.registerBaseline(deviceID, "fw-3.0", time.Now().Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	blockedSeal, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Mira",
+		"summary":  "seal during drift must be blocked",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blockedSeal, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blockedSeal, "unresolved_config_drift"); err != nil {
+		return err
+	}
+	adopted, err := h.request(http.MethodPost, "/cases/"+caseID+"/config-resolution", map[string]any{
+		"actor":  "Lin",
+		"action": "adopt_current",
+		"reason": "firmware update verified for this case",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(adopted, http.StatusOK); err != nil {
+		return err
+	}
+	rebased, err := nestedString(adopted.Body, "case", "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if rebased != baselineThree {
+		return fmt.Errorf("adopt_current pinned %q, expected %q", rebased, baselineThree)
+	}
+
+	// History is preserved: earlier measurements still cite baseline one.
+	reread, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	firstDecision, err := nestedStringAt(reread.Body, "measurements", 0, "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if firstDecision != baselineOne {
+		return fmt.Errorf("historical measurement rebased to %q", firstDecision)
+	}
+
+	// The seal captures the configuration in force at seal time.
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Mira",
+		"summary":  "accepted measurement sealed for review",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	sealedWith, err := nestedString(sealed.Body, "seal", "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if sealedWith != baselineThree {
+		return fmt.Errorf("seal recorded config %q, expected %q", sealedWith, baselineThree)
+	}
+
+	// Sealed evidence is frozen even when the device config moves on.
+	baselineFour, err := h.registerBaseline(deviceID, "fw-4.0", time.Now())
+	if err != nil {
+		return err
+	}
+	frozen, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	frozenStatus, err := nestedString(frozen.Body, "config_status")
+	if err != nil {
+		return err
+	}
+	if frozenStatus != "superseded" {
+		return fmt.Errorf("sealed case config status = %q", frozenStatus)
+	}
+	frozenSeal, err := nestedString(frozen.Body, "seal", "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if frozenSeal != baselineThree {
+		return fmt.Errorf("sealed evidence rewritten to config %q", frozenSeal)
+	}
+	frozenDecision, err := nestedStringAt(frozen.Body, "measurements", 0, "config_baseline_id")
+	if err != nil {
+		return err
+	}
+	if frozenDecision != baselineOne {
+		return fmt.Errorf("sealed measurement history rewritten to %q", frozenDecision)
+	}
+	sealedResolve, err := h.request(http.MethodPost, "/cases/"+caseID+"/config-resolution", map[string]any{
+		"actor":  "Lin",
+		"action": "adopt_current",
+		"reason": "sealed cases must not change",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealedResolve, http.StatusConflict); err != nil {
+		return err
+	}
+
+	// The case read embeds every baseline its decisions referenced.
+	for _, id := range []string{baselineOne, baselineTwo, baselineThree, baselineFour} {
+		if !hasBaseline(frozen.Body, id) {
+			return fmt.Errorf("case read does not reconstruct baseline %s", id)
+		}
+	}
+
+	// The event trail exposes the configuration source of each decision.
+	events, err := h.request(http.MethodGet, "/cases/"+caseID+"/events", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(events, http.StatusOK); err != nil {
+		return err
+	}
+	if !hasEvent(events.Body, "case_config_resolved") {
+		return errors.New("config resolution audit event is missing")
+	}
+	if !hasEvent(events.Body, "config_baseline_registered") {
+		return errors.New("baseline registration audit event is missing")
+	}
+	items, err := nestedSlice(events.Body, "events")
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		event, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if event["config_baseline_id"] == "" || event["config_baseline_id"] == nil {
+			return fmt.Errorf("event %v has no config baseline source", event["kind"])
+		}
+	}
+
+	// The device read exposes the baseline history and the current one.
+	deviceView, err := h.request(http.MethodGet, "/devices/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(deviceView, http.StatusOK); err != nil {
+		return err
+	}
+	current, err := nestedString(deviceView.Body, "current_config_baseline", "id")
+	if err != nil {
+		return err
+	}
+	if current != baselineFour {
+		return fmt.Errorf("current device baseline = %q, expected %q", current, baselineFour)
+	}
+	list, err := h.request(http.MethodGet, "/devices/"+deviceID+"/config-baselines", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(list, http.StatusOK); err != nil {
+		return err
+	}
+	baselines, err := nestedSlice(list.Body, "config_baselines")
+	if err != nil {
+		return err
+	}
+	if len(baselines) != 4 {
+		return fmt.Errorf("device baseline history has %d entries, expected 4", len(baselines))
+	}
+	return nil
+}
+
+func hasBaseline(root map[string]any, id string) bool {
+	items, err := nestedSlice(root, "config_baselines")
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		baseline, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if baseline["id"] == id {
+			return true
+		}
+	}
+	return false
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -440,6 +826,34 @@ func (h *harness) createDevice(tag string) (string, error) {
 	return nestedString(response.Body, "device", "id")
 }
 
+func (h *harness) registerBaseline(deviceID, firmware string, effectiveAt time.Time) (string, error) {
+	response, err := h.request(http.MethodPost, "/devices/"+deviceID+"/config-baselines", map[string]any{
+		"firmware_version":  firmware,
+		"fixture":           "fixture-a",
+		"correction_params": "offset=0.01",
+		"effective_at":      effectiveAt.UTC(),
+		"registered_by":     "Lin",
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedString(response.Body, "config_baseline", "id")
+}
+
+func (h *harness) deviceWithBaseline(tag string) (string, error) {
+	deviceID, err := h.createDevice(tag)
+	if err != nil {
+		return "", err
+	}
+	if _, err := h.registerBaseline(deviceID, "fw-1.0", time.Now().Add(-time.Hour)); err != nil {
+		return "", err
+	}
+	return deviceID, nil
+}
+
 func (h *harness) openCase(deviceID string) (apiResponse, error) {
 	response, err := h.request(http.MethodPost, "/cases", map[string]any{
 		"device_id": deviceID,
@@ -464,7 +878,7 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 }
 
 func (h *harness) rejectedCase(tag string) (string, error) {
-	deviceID, err := h.createDevice(tag)
+	deviceID, err := h.deviceWithBaseline(tag)
 	if err != nil {
 		return "", err
 	}
@@ -487,7 +901,7 @@ func (h *harness) rejectedCase(tag string) (string, error) {
 }
 
 func (h *harness) readyCase(tag string) (string, error) {
-	deviceID, err := h.createDevice(tag)
+	deviceID, err := h.deviceWithBaseline(tag)
 	if err != nil {
 		return "", err
 	}
@@ -535,6 +949,18 @@ func nestedString(root map[string]any, path ...string) (string, error) {
 	text, ok := value.(string)
 	if !ok {
 		return "", fmt.Errorf("%s is not a string", strings.Join(path, "."))
+	}
+	return text, nil
+}
+
+func nestedStringAt(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
 	}
 	return text, nil
 }

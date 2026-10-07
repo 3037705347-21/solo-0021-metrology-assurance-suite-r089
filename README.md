@@ -5,6 +5,13 @@ measurement assurance work. It registers devices, opens verification cases,
 records measurements, handles failed tolerance decisions, and seals traceable
 evidence records.
 
+Device configuration is tracked explicitly: the steward registers immutable
+config baselines (firmware version, fixture, correction parameters) with an
+effective time, each case pins the baseline in force when it opens, and any
+configuration change during a case must be resolved explicitly before the
+case can proceed. Sealed evidence always keeps the configuration recorded at
+seal time.
+
 ## Run
 
 ```bash
@@ -22,6 +29,7 @@ go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
+go run ./cmd/workflowcheck --workflow config-baseline
 ```
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
@@ -36,10 +44,13 @@ or extend these smoke checks with red/green verification tests.
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/config-baselines`
+- `GET /devices/{id}/config-baselines`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
 - `POST /cases/{id}/reopen`
+- `POST /cases/{id}/config-resolution`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
 

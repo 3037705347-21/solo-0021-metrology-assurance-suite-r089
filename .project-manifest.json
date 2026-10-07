@@ -75,10 +75,11 @@
       "steps": [
         "verify the device exists and is active",
         "reject a second unfinished case for the same device",
+        "require an effective config baseline and pin it on the new case",
         "open one waiting case with a nominal value and tolerance"
       ],
-      "success": "returns an awaiting_measurement case",
-      "failure": "returns not-found or active-case conflict errors",
+      "success": "returns an awaiting_measurement case with its pinned config baseline",
+      "failure": "returns not-found, active-case conflict, or no-effective-baseline errors",
       "verification": "workflowcheck opens and reads a case, then rejects a concurrent second case",
       "module_ids": [
         "runtimecheck",
@@ -146,6 +147,29 @@
       "success": "returns a sealed case and one evidence seal",
       "failure": "returns conflict for a non-reviewable case or a duplicate seal",
       "verification": "workflowcheck races two seal requests and verifies exactly one succeeds",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
+      "id": "config-baseline",
+      "name": "Config baseline and drift resolution",
+      "entry": "POST /devices/{id}/config-baselines",
+      "steps": [
+        "register immutable config baselines with firmware, fixture, correction params, and effective time",
+        "pin the effective baseline when a case opens and reject opening without one",
+        "block measurement, reopen, and seal while config drift is unresolved",
+        "resolve drift explicitly by keeping the pinned baseline or adopting the effective one"
+      ],
+      "success": "returns baselines, pinned cases, and resolved configuration sources",
+      "failure": "returns no_effective_baseline or unresolved_config_drift conflicts",
+      "verification": "workflowcheck opens without a baseline, drifts a case, resolves both ways, and seals with the adopted baseline",
       "module_ids": [
         "runtimecheck",
         "httpapi",

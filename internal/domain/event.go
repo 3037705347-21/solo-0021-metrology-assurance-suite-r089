@@ -7,26 +7,28 @@ import (
 )
 
 type AuditEvent struct {
-	ID          string    `json:"id"`
-	SubjectType string    `json:"subject_type"`
-	SubjectID   string    `json:"subject_id"`
-	CaseID      string    `json:"case_id,omitempty"`
-	Kind        string    `json:"kind"`
-	Actor       string    `json:"actor"`
-	Detail      string    `json:"detail"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	SubjectType      string    `json:"subject_type"`
+	SubjectID        string    `json:"subject_id"`
+	CaseID           string    `json:"case_id,omitempty"`
+	Kind             string    `json:"kind"`
+	Actor            string    `json:"actor"`
+	Detail           string    `json:"detail"`
+	ConfigBaselineID string    `json:"config_baseline_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
-func NewAuditEvent(id, subjectType, subjectID, caseID, kind, actor, detail string, at time.Time) (AuditEvent, error) {
+func NewAuditEvent(id, subjectType, subjectID, caseID, kind, actor, detail, configBaselineID string, at time.Time) (AuditEvent, error) {
 	item := AuditEvent{
-		ID:          strings.TrimSpace(id),
-		SubjectType: strings.TrimSpace(subjectType),
-		SubjectID:   strings.TrimSpace(subjectID),
-		CaseID:      strings.TrimSpace(caseID),
-		Kind:        strings.TrimSpace(kind),
-		Actor:       strings.TrimSpace(actor),
-		Detail:      strings.TrimSpace(detail),
-		CreatedAt:   at.UTC(),
+		ID:               strings.TrimSpace(id),
+		SubjectType:      strings.TrimSpace(subjectType),
+		SubjectID:        strings.TrimSpace(subjectID),
+		CaseID:           strings.TrimSpace(caseID),
+		Kind:             strings.TrimSpace(kind),
+		Actor:            strings.TrimSpace(actor),
+		Detail:           strings.TrimSpace(detail),
+		ConfigBaselineID: strings.TrimSpace(configBaselineID),
+		CreatedAt:        at.UTC(),
 	}
 	if err := item.Validate(); err != nil {
 		return AuditEvent{}, err
